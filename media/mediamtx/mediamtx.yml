@@ -1,0 +1,38 @@
+# MediaMTX: ingest only. Publishers push SRT/RTMP here; the control service's ffmpeg reads
+# the stream back over RTSP (internal network) and feeds Shaka Packager.
+logLevel: info
+
+api: no
+metrics: no
+pprof: no
+playback: no
+
+# Every publish/read is authorized by the control service (unknown stream keys are rejected).
+# The address (with its ?token=) is injected via MTX_AUTHHTTPADDRESS in docker-compose.yml.
+authMethod: http
+authHTTPAddress: http://control:8080/mediamtx/auth
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
+
+# Internal read-back for ffmpeg (not exposed outside the compose network).
+rtsp: yes
+rtspAddress: :8554
+
+# Public ingest. OBS RTMP: server rtmp://<host>:1935/live, stream key <streamKey>
+rtmp: yes
+rtmpAddress: :1935
+
+# Public ingest. SRT: srt://<host>:8890?streamid=publish:<streamKey>
+srt: yes
+srtAddress: :8890
+
+# Playback from MediaMTX itself is disabled; viewers only get DRM-packaged output.
+hls: no
+webrtc: no
+
+writeQueueSize: 2048
+
+paths:
+  all_others:

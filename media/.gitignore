@@ -1,0 +1,4 @@
+.env
+data/
+control/node_modules/
+control/dist/

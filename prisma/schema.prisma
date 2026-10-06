@@ -1,0 +1,363 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- Auth.js ----------
+
+// Staff roles: permissions per role live in src/lib/roles.ts
+enum Role {
+  VIEWER
+  SUPPORT // cases + viewers
+  FINANCE // payments + orders
+  MANAGER // events + everything above
+  ADMIN // everything incl. settings + team
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  role          Role      @default(VIEWER)
+  createdAt     DateTime  @default(now())
+
+  // Profile (account settings)
+  phone String?
+
+  // Tax invoice details (optional)
+  billingType    BillingType?
+  billingName    String? // person or company name
+  billingTaxId   String?
+  billingBranch  String? // "00000" = head office
+  billingAddress String?
+
+  // Refund destination
+  refundBankCode    String? // 3-digit Thai bank code
+  refundAccountNo   String?
+  refundAccountName String?
+
+  // Email notifications (see src/lib/email)
+  notifyPayment Boolean @default(true) // slip verified / rejected
+  notifyEvent   Boolean @default(true) // event about to start, replay expiring
+  notifySupport Boolean @default(true) // staff replied to a case
+
+  deletedAt DateTime? // soft-deleted + anonymised; orders kept for accounting
+
+  accounts      Account[]
+  sessions      Session[]
+  orders        Order[]
+  tickets       Ticket[]
+  viewSessions  ViewSession[]
+  cases         SupportCase[] @relation("CaseOwner")
+  assignedCases SupportCase[] @relation("CaseAssignee")
+  caseMessages  CaseMessage[]
+  emailLogs     EmailLog[]
+  invitesSent   TeamInvite[]
+}
+
+enum BillingType {
+  PERSON
+  COMPANY
+}
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+}
+
+model Session {
+  sessionToken String    @unique
+  userId       String
+  expires      DateTime
+  // Device list in account settings; filled in by src/lib/sessions.ts on request
+  userAgent    String?
+  ipAddress    String?
+  lastSeenAt   DateTime?
+  createdAt    DateTime  @default(now())
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
+}
+
+// ---------- Domain ----------
+
+enum EventStatus {
+  DRAFT // created, not on sale
+  SCHEDULED // on sale, waiting for start
+  LIVE // media server is publishing
+  ENDED // live finished, replay available
+  ARCHIVED // replay removed
+}
+
+enum InputType {
+  SRT // push
+  RTMP // push
+  HLS // pull .m3u8
+  DASH // pull .mpd
+  RTSP // pull rtsp://
+  BROWSER // capture a web page with Chromium (no DRM sources, re-encoded)
+}
+
+model Event {
+  id          String      @id @default(cuid())
+  slug        String      @unique
+  title       String
+  description String?
+  coverUrl    String?
+  priceSatang Int // THB * 100
+  startsAt    DateTime
+  status      EventStatus @default(DRAFT)
+  replayDays  Int         @default(7)
+
+  // Media server contract (see src/lib/media/types.ts)
+  inputType   InputType @default(SRT)
+  inputUrl    String? // source URL for pull types (HLS / DASH / RTSP / BROWSER)
+  streamKey   String    @unique @default(cuid()) // push key for SRT/RTMP
+  contentId   String    @unique @default(cuid()) // DRM content id (cid)
+  ingestUrl   String? // push URL returned by media server on start (contains streamKey)
+  manifestUrl String? // CDN URL of DASH/HLS manifest, set by media server
+
+  endedAt   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  orders       Order[]
+  tickets      Ticket[]
+  viewSessions ViewSession[]
+}
+
+enum OrderStatus {
+  PENDING // waiting for a slip
+  PAID // a payment was VERIFIED and a ticket issued
+  CANCELLED
+  REFUNDED
+}
+
+model Order {
+  id           String      @id @default(cuid())
+  userId       String
+  eventId      String
+  amountSatang Int
+  status       OrderStatus @default(PENDING)
+  createdAt    DateTime    @default(now())
+  paidAt       DateTime?
+
+  user     User      @relation(fields: [userId], references: [id])
+  event    Event     @relation(fields: [eventId], references: [id])
+  ticket   Ticket?
+  payments Payment[]
+}
+
+enum PaymentStatus {
+  PROCESSING // slip received, checks running
+  VERIFIED // auto/admin approved -> ticket issued
+  NEEDS_REVIEW // nothing contradicts the order but some field could not be read
+  REJECTED
+}
+
+// One uploaded transfer slip. Not bank-confirmed unless verifiedBy = "provider:*".
+model Payment {
+  id              String        @id @default(cuid())
+  orderId         String
+  status          PaymentStatus @default(PROCESSING)
+  slipHash        String        @unique // sha256 of the uploaded file
+  slipPath        String // storage key of the image (private, admin-only)
+  transRef        String?       @unique // from slip mini-QR; strongest duplicate guard
+  sendingBank     String? // bank code from slip QR
+  amountSatang    Int? // as read from slip
+  transferredAt   DateTime? // as read from slip
+  receiverName    String?
+  receiverAccount String? // masked as printed on slip
+  qrPayload       String?
+  ocrText         String?
+  checks          Json // SlipCheckResult[] (see src/lib/slip/types.ts)
+  rejectReason    String?
+  verifiedBy      String? // "auto" | "admin:<userId>" | "provider:<name>"
+  reviewedAt      DateTime?
+  createdAt       DateTime      @default(now())
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@index([status])
+}
+
+model Ticket {
+  id        String   @id @default(cuid())
+  userId    String
+  eventId   String
+  orderId   String   @unique
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id])
+  event Event @relation(fields: [eventId], references: [id])
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@unique([userId, eventId])
+}
+
+// One active playback device per user per event (heartbeat-based lock)
+model ViewSession {
+  id         String   @id @default(cuid())
+  userId     String
+  eventId    String
+  deviceId   String
+  startedAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id])
+  event Event @relation(fields: [eventId], references: [id])
+
+  @@unique([userId, eventId])
+}
+
+// ---------- Support ----------
+
+enum CaseStatus {
+  OPEN // waiting for staff
+  PENDING_CUSTOMER // staff replied, waiting for customer
+  RESOLVED
+  CLOSED
+}
+
+enum CaseCategory {
+  PAYMENT
+  PLAYBACK
+  DEVICE
+  REFUND
+  ACCOUNT
+  OTHER
+}
+
+enum CasePriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model SupportCase {
+  id          String       @id @default(cuid())
+  number      Int          @unique @default(autoincrement()) // shown as TT-C<number>
+  userId      String
+  orderId     String?
+  eventId     String?
+  category    CaseCategory
+  subject     String
+  status      CaseStatus   @default(OPEN)
+  priority    CasePriority @default(NORMAL)
+  assigneeId  String?
+  duringLive  Boolean      @default(false) // event was LIVE when opened -> sort first
+  deviceInfo  Json? // UA + DRM support captured by the client
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  lastStaffAt DateTime?
+  closedAt    DateTime?
+
+  user     User          @relation("CaseOwner", fields: [userId], references: [id])
+  assignee User?         @relation("CaseAssignee", fields: [assigneeId], references: [id])
+  messages CaseMessage[]
+
+  @@index([status, priority])
+}
+
+model CaseMessage {
+  id          String   @id @default(cuid())
+  caseId      String
+  authorId    String
+  isStaff     Boolean
+  internal    Boolean  @default(false) // staff-only note
+  body        String
+  attachments Json     @default("[]") // [{ key, name, size, type }] in upload storage
+  createdAt   DateTime @default(now())
+
+  case   SupportCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  author User        @relation(fields: [authorId], references: [id])
+}
+
+model CannedReply {
+  id        String   @id @default(cuid())
+  title     String
+  body      String
+  createdAt DateTime @default(now())
+}
+
+// ---------- Settings / team ----------
+
+// Key-value settings edited in /admin/settings; typed access in src/lib/settings.ts
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+}
+
+model TeamInvite {
+  id          String    @id @default(cuid())
+  email       String
+  role        Role
+  invitedById String
+  token       String    @unique
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  invitedBy User @relation(fields: [invitedById], references: [id])
+}
+
+// Who did what in admin (settings, roles, refunds, kicks)
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  target    String?
+  data      Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// ---------- Email ----------
+
+enum EmailStatus {
+  SENT
+  FAILED
+  SKIPPED // user opted out or email disabled
+}
+
+model EmailLog {
+  id        String      @id @default(cuid())
+  userId    String?
+  to        String
+  template  String
+  status    EmailStatus
+  error     String?
+  createdAt DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+}

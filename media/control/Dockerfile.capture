@@ -1,0 +1,33 @@
+# BROWSER input capture service: Xvfb + PulseAudio + Chromium + ffmpeg, driven by dist/capture.js.
+# Same TypeScript sources as control; separate image so untrusted web pages never run next to the
+# DRM keys / MEDIA_CONTROL_SECRET, and so the (heavy) browser can get its own CPU budget.
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci || npm install
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build && npm prune --omit=dev
+
+FROM node:22-bookworm-slim
+# Debian's chromium has no Widevine CDM. None is added here, on purpose: DRM-protected pages
+# cannot be captured (they render black), see README.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      chromium xvfb xauth matchbox-window-manager pulseaudio ffmpeg ca-certificates \
+      fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji fonts-thai-tlwg \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \
+ && useradd --create-home --uid 10001 capture
+
+# Managed policy: no downloads/password manager/permissions, internal hostnames blocked.
+COPY capture/chromium-policy.json /etc/chromium/policies/managed/termtee.json
+
+WORKDIR /app
+COPY --from=build /app/package.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+ENV NODE_ENV=production CAPTURE_WORK_DIR=/tmp/capture
+USER capture
+EXPOSE 8090
+CMD ["node", "dist/capture.js"]

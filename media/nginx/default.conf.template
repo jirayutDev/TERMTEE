@@ -1,0 +1,40 @@
+# CDN origin for encrypted CMAF segments + DASH/HLS manifests.
+# ${APP_ORIGIN} is substituted by the nginx image entrypoint (envsubst) at startup.
+server {
+  listen 80;
+  server_name _;
+  root /data/output;
+  autoindex off;
+  sendfile on;
+  tcp_nopush on;
+
+  location = /healthz { return 200 "ok\n"; }
+
+  # Only media files are served; everything else (tmp files, dotfiles) is 404.
+  location ~ ^/[A-Za-z0-9_-]+/.+\.(mpd|m3u8|m4s|mp4)$ {
+    if ($request_method = OPTIONS) {
+      add_header Access-Control-Allow-Origin "${APP_ORIGIN}" always;
+      add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+      add_header Access-Control-Allow-Headers "Range, Origin, Accept" always;
+      add_header Access-Control-Max-Age 86400 always;
+      return 204;
+    }
+    add_header Access-Control-Allow-Origin "${APP_ORIGIN}" always;
+    add_header Access-Control-Expose-Headers "Content-Length, Content-Range" always;
+    add_header Vary Origin always;
+
+    # Manifests change every segment while live: never cache. Segments are immutable.
+    set $cc "public, max-age=31536000, immutable";
+    if ($uri ~ \.(mpd|m3u8)$) { set $cc "no-cache"; }
+    add_header Cache-Control $cc always;
+  }
+
+  location / { return 404; }
+
+  types {
+    application/dash+xml mpd;
+    application/vnd.apple.mpegurl m3u8;
+    video/iso.segment m4s;
+    video/mp4 mp4;
+  }
+}
